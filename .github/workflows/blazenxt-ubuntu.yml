@@ -108,6 +108,14 @@ jobs:
           echo "=========================================================="
           mkdir -p "$HOME/.blazenxt"
           sudo mkdir -p /opt/blazenxt && sudo chown "$USER" /opt/blazenxt
+          # /workspace is the designated sandbox folder. Deliberately NOT $HOME/work:
+          # on this image $HOME/work is the runner's own job workspace (_temp,
+          # _PipelineMapping, checkouts) and must not be backed up.
+          sudo mkdir -p /workspace
+          sudo chown "$USER" /workspace
+          sudo chmod 777 /workspace
+          echo "[BlazeNXT] Sandbox folder ready: /workspace"
+          echo "WORKSPACE_DIR=/workspace" >> "$GITHUB_ENV"
 
       - name: Install Desktop & Remote Access Stack
         if: ${{ github.event.inputs.install_desktop != 'false' }}
@@ -457,7 +465,7 @@ jobs:
             echo " Docker       : $(docker ps --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
             echo ""
             echo " Backed up at shutdown and restored next session:"
-            echo "   ~/work  +  any custom persist_paths  (encrypted)"
+            echo "   /workspace  +  any custom persist_paths  (encrypted)"
             echo "====================================================="
           } > "$INFO"
           mkdir -p "$HOME/Desktop" 2>/dev/null || true
@@ -637,10 +645,6 @@ jobs:
           # ~800 MB of tool caches in one measurement). Back up what the operator
           # actually works on instead: ~/work, their persist_paths, and a small
           # allowlist of config files.
-          mkdir -p "$HOME/work"
-          echo "[BlazeNXT] Backing up ~/work (the designated sandbox folder)..."
-          tar -C "$HOME" --exclude='./work/.cache' -cf - ./work 2>/dev/null | tar -C "$STAGE/home" -xf - 2>/dev/null || true
-
           CFG=""
           for f in .ssh .gitconfig .git-credentials .bashrc .profile .bash_aliases .vimrc .tmux.conf; do
             [ -e "$HOME/$f" ] && CFG="$CFG ./$f"
@@ -650,7 +654,8 @@ jobs:
             tar -C "$HOME" -cf - $CFG 2>/dev/null | tar -C "$STAGE/home" -xf - 2>/dev/null || true
           fi
 
-          EXTRA="${{ github.event.inputs.persist_paths }}"
+          # /workspace is always persisted; the operator can add more paths
+          EXTRA="/workspace;${{ github.event.inputs.persist_paths }}"
           if [ -n "$EXTRA" ]; then
             i=0
             IFS=';' read -ra PATHS <<< "$EXTRA"
