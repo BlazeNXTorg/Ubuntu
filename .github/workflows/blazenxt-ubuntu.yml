@@ -1,0 +1,616 @@
+name: BlazeNXT Ubuntu Workstation
+
+on:
+  schedule:
+    # Backstop only - the self-chain is the primary mechanism.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      node_name:
+        description: "Stable Tailscale/MagicDNS name - keep the default so your clients never change"
+        required: false
+        default: "blazenxt-ubuntu"
+      duration_minutes:
+        description: "Session length in minutes (10-355). State is backed up and the next session starts at this point."
+        required: false
+        default: "330"
+      install_desktop:
+        description: "Install the desktop stack (XFCE + xrdp + noVNC + code-server). OFF = SSH + Docker only, boots in ~1 min"
+        type: boolean
+        required: false
+        default: true
+      docker_mode:
+        description: "Keep a Docker container running for the session"
+        type: boolean
+        required: false
+        default: true
+      ssh_password_login:
+        description: "Allow SSH password login (LINUX_PASSWORD secret). Key-based auth always works."
+        type: boolean
+        required: false
+        default: true
+      websocket_port:
+        description: "noVNC browser desktop port"
+        required: false
+        default: "6080"
+      code_server_port:
+        description: "code-server (VS Code in browser) port"
+        required: false
+        default: "8080"
+      extra_ports:
+        description: "Extra TCP ports to log as reachable, comma separated e.g. 3000,5432,8000"
+        required: false
+        default: ""
+      persist_state:
+        description: "Back up your home folder and restore it into the next session"
+        type: boolean
+        required: false
+        default: true
+      persist_paths:
+        description: "Extra folders to back up, separated by ; e.g. /opt/data;/srv/app"
+        required: false
+        default: ""
+      persist_max_mb:
+        description: "Backup size cap in MB (Free plan artifact storage is ~500 MB total)"
+        required: false
+        default: "300"
+      tailscale_exit_node:
+        description: "Advertise this node as a Tailscale exit node"
+        type: boolean
+        required: false
+        default: false
+      chain_next_session:
+        description: "Start the next session automatically when this one ends"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: blazenxt-ubuntu
+  cancel-in-progress: false
+
+jobs:
+  blazenxt-ubuntu:
+    name: "BlazeNXT-Ubuntu-4vcpu"
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    env:
+      NODE_NAME: ${{ github.event.inputs.node_name || 'blazenxt-ubuntu' }}
+      ORG_BRAND: "BlazeNXTOrg"
+
+    steps:
+      - name: System Audit & Environment Initialization
+        shell: bash
+        run: |
+          set -u
+          echo "=========================================================="
+          echo "        >>> BlazeNXTOrg UBUNTU CLOUD WORKSTATION <<<      "
+          echo "=========================================================="
+          echo " Organization : $ORG_BRAND"
+          echo " OS           : $(. /etc/os-release && echo "$PRETTY_NAME")"
+          echo " Kernel       : $(uname -r)"
+          echo " vCPU         : $(nproc)"
+          echo " RAM          : $(free -h | awk '/^Mem:/{print $2}')"
+          echo " Disk free    : $(df -h / | awk 'NR==2{print $4}')"
+          echo " User         : $(whoami)  (sudo without password)"
+          echo " Run ID       : ${GITHUB_RUN_ID}"
+          echo " Node name    : ${NODE_NAME}"
+          echo "=========================================================="
+          mkdir -p "$HOME/.blazenxt"
+          sudo mkdir -p /opt/blazenxt && sudo chown "$USER" /opt/blazenxt
+
+      - name: Install Desktop & Remote Access Stack
+        if: ${{ github.event.inputs.install_desktop != 'false' }}
+        shell: bash
+        run: |
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          echo "[BlazeNXT] Installing XFCE, xrdp, TigerVNC, noVNC, code-server ..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            xfce4 xfce4-goodies xfce4-terminal dbus-x11 \
+            xrdp xorgxrdp \
+            tigervnc-standalone-server tigervnc-tools \
+            novnc websockify \
+            net-tools jq curl wget unzip >/dev/null
+          echo "[BlazeNXT] Desktop packages installed."
+
+          # XFCE session for xrdp
+          printf '#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nexec startxfce4\n' > "$HOME/.xsession"
+          chmod +x "$HOME/.xsession"
+          cp "$HOME/.xsession" "$HOME/.xsessionrc"
+
+          # XFCE session for the VNC desktop (shared with noVNC)
+          mkdir -p "$HOME/.vnc"
+          printf '#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nexec startxfce4\n' > "$HOME/.vnc/xstartup"
+          chmod +x "$HOME/.vnc/xstartup"
+
+          # Disable the xrdp login screen prompts; keep the session simple
+          sudo sed -i 's/^new_cursors=true/new_cursors=false/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+
+          echo "[BlazeNXT] Installing code-server (VS Code in the browser)..."
+          curl -fsSL https://code-server.dev/install.sh | sh >/dev/null 2>&1 || echo "[BlazeNXT] code-server install failed - continuing"
+          echo "[BlazeNXT] Stack ready."
+
+      - name: Restore Previous Session State
+        if: ${{ github.event.inputs.persist_state != 'false' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          REPO="$GITHUB_REPOSITORY"
+          ART="blazenxt-ubuntu-state"
+          echo "[BlazeNXT] Looking for a previous session backup..."
+          RAW=$(gh api "repos/$REPO/actions/artifacts?name=$ART&per_page=100" 2>/dev/null || echo "")
+          if [ -z "$RAW" ]; then echo "[BlazeNXT] No backup found - clean start."; exit 0; fi
+
+          NEWEST=$(echo "$RAW" | jq -r '[.artifacts[] | select(.expired==false)] | sort_by(.created_at) | reverse | .[0] // empty')
+          if [ -z "$NEWEST" ] || [ "$NEWEST" = "null" ]; then echo "[BlazeNXT] No usable backup - clean start."; exit 0; fi
+
+          ART_ID=$(echo "$NEWEST" | jq -r '.id')
+          RUN_ID=$(echo "$NEWEST" | jq -r '.workflow_run.id')
+          SIZE=$(echo "$NEWEST" | jq -r '.size_in_bytes')
+          echo "[BlazeNXT] Newest backup: id=$ART_ID run=$RUN_ID size=$((SIZE/1024/1024)) MB"
+
+          # Free-plan storage is small: keep exactly one backup
+          echo "$RAW" | jq -r '.artifacts[] | select(.expired==false) | .id' | tail -n +2 | while read -r old; do
+            gh api --method DELETE "repos/$REPO/actions/artifacts/$old" >/dev/null 2>&1 && echo "  pruned older backup $old"
+          done
+
+          DEST=/tmp/blazenxt-restore
+          rm -rf "$DEST"; mkdir -p "$DEST"
+          if ! gh run download "$RUN_ID" -n "$ART" -D "$DEST" --repo "$REPO" >/dev/null 2>&1; then
+            echo "[BlazeNXT] Download failed - clean start."; exit 0
+          fi
+
+          if [ -d "$DEST/home" ]; then
+            cp -a "$DEST/home/." "$HOME/" 2>/dev/null || true
+            echo "[BlazeNXT] Restored home folder ($(find "$HOME" -type f 2>/dev/null | wc -l) files present)"
+          fi
+          if [ -d "$DEST/extra" ] && [ -f "$DEST/manifest.txt" ]; then
+            grep '^extra/' "$DEST/manifest.txt" | while IFS='|' read -r rel target; do
+              rel=$(echo "$rel" | xargs); target=$(echo "$target" | xargs)
+              [ -d "$DEST/$rel" ] || continue
+              sudo mkdir -p "$target" 2>/dev/null || mkdir -p "$target"
+              cp -a "$DEST/$rel/." "$target/" 2>/dev/null || true
+              echo "  restored extra path -> $target"
+            done
+          fi
+          rm -rf "$DEST"
+          echo "[BlazeNXT] Restore complete."
+
+      - name: Attach BlazeNXT Tailscale Node
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          hostname: ${{ env.NODE_NAME }}
+          args: ${{ github.event.inputs.tailscale_exit_node == 'true' && '--advertise-exit-node' || '' }}
+
+      - name: Resolve Tailscale IP & MagicDNS Name
+        shell: bash
+        run: |
+          set -u
+          TS=/usr/bin/tailscale
+          [ -x "$TS" ] || TS=$(command -v tailscale)
+          IP=""
+          for i in $(seq 1 15); do
+            IP=$($TS ip -4 2>/dev/null | head -1 || true)
+            [ -n "$IP" ] && break
+            sleep 4
+          done
+          if [ -z "$IP" ]; then echo "[-] Could not get a Tailscale IP"; exit 1; fi
+          DNS=$($TS status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//' || true)
+          [ -n "$DNS" ] || DNS="$NODE_NAME"
+          echo "[BlazeNXT] Tailscale IP: $IP"
+          echo "[BlazeNXT] MagicDNS   : $DNS"
+          echo "TAILSCALE_IP=$IP" >> "$GITHUB_ENV"
+          echo "TAILSCALE_DNS=$DNS" >> "$GITHUB_ENV"
+
+      - name: Configure User Password & SSH Access
+        shell: bash
+        run: |
+          set -u
+          PW="${{ secrets.LINUX_PASSWORD }}"
+          if [ -z "$PW" ]; then
+            PW=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 16)
+            echo "[BlazeNXT] LINUX_PASSWORD secret is empty - generated a random one for this session only."
+          fi
+          echo "::add-mask::$PW"
+          echo "$USER:$PW" | sudo chpasswd
+          echo "LINUX_PASSWORD=$PW" >> "$GITHUB_ENV"
+          echo "LINUX_USER=$USER" >> "$GITHUB_ENV"
+
+          sudo mkdir -p /etc/ssh/sshd_config.d
+          ssh_accept="yes"
+          if [ "${{ github.event.inputs.ssh_password_login }}" = "false" ]; then ssh_accept="no"; fi
+          sudo tee /etc/ssh/sshd_config.d/99-blazenxt.conf >/dev/null <<SSHEOF
+          Port 22
+          PasswordAuthentication $ssh_accept
+          KbdInteractiveAuthentication $ssh_accept
+          PermitRootLogin no
+          UsePAM yes
+          ClientAliveInterval 30
+          ClientAliveCountMax 240
+          SSHEOF
+
+          sudo ssh-keygen -A >/dev/null 2>&1 || true
+          sudo systemctl stop ssh 2>/dev/null || true
+          sudo pkill -x sshd 2>/dev/null || true
+          sleep 1
+          sudo /usr/sbin/sshd
+          sleep 1
+          if ss -ltn | grep -q ':22 '; then
+            echo "[BlazeNXT] SSH is listening on port 22 (user: $USER, password login: $ssh_accept)"
+          else
+            echo "[-] sshd did not start"; sudo /usr/sbin/sshd -T 2>&1 | head -5
+          fi
+
+      - name: Start Desktop Services & Verify
+        if: ${{ github.event.inputs.install_desktop != 'false' }}
+        shell: bash
+        run: |
+          set -u
+          echo "[BlazeNXT] Starting xrdp..."
+          sudo service xrdp start >/dev/null 2>&1 || sudo /etc/init.d/xrdp start >/dev/null 2>&1 || true
+          sleep 3
+          if ! ss -ltn | grep -q ':3389 '; then
+            echo "[BlazeNXT] init.d did not bring xrdp up - starting binaries directly"
+            sudo /usr/sbin/xrdp-sesman >/dev/null 2>&1 &
+            sleep 2
+            sudo /usr/sbin/xrdp >/dev/null 2>&1 &
+            sleep 3
+          fi
+          ss -ltn | grep -q ':3389 ' && echo "[BlazeNXT] xrdp listening on 3389" || echo "[-] xrdp port 3389 not listening"
+
+          echo "[BlazeNXT] Starting the XFCE VNC desktop (localhost only)..."
+          if ! ss -ltn | grep -q ':5901 '; then
+            vncserver -kill :1 >/dev/null 2>&1 || true
+            vncserver :1 -geometry 1600x900 -depth 24 -localhost yes -SecurityTypes None -xstartup "$HOME/.vnc/xstartup" >/dev/null 2>&1 || \
+              echo "[-] vncserver failed to start"
+            sleep 3
+          fi
+          ss -ltn | grep -q ':5901 ' && echo "[BlazeNXT] VNC listening on 5901" || echo "[-] VNC port 5901 not listening"
+
+          WSPORT="${{ github.event.inputs.websocket_port }}"
+          echo "[BlazeNXT] Starting noVNC on port $WSPORT ..."
+          pkill -f websockify 2>/dev/null || true
+          sleep 1
+          nohup websockify --web /usr/share/novnc "$WSPORT" localhost:5901 >"$HOME/.blazenxt/novnc.log" 2>&1 &
+          sleep 3
+          ss -ltn | grep -q ":$WSPORT " && echo "[BlazeNXT] noVNC listening on $WSPORT" || echo "[-] noVNC port $WSPORT not listening"
+
+          CSPORT="${{ github.event.inputs.code_server_port }}"
+          if command -v code-server >/dev/null 2>&1; then
+            echo "[BlazeNXT] Starting code-server on port $CSPORT ..."
+            pkill -f code-server 2>/dev/null || true
+            sleep 1
+            nohup code-server --bind-addr "0.0.0.0:$CSPORT" --auth none --disable-telemetry \
+              >"$HOME/.blazenxt/code-server.log" 2>&1 &
+            sleep 5
+            ss -ltn | grep -q ":$CSPORT " && echo "[BlazeNXT] code-server listening on $CSPORT" || echo "[-] code-server port not listening"
+          else
+            echo "[BlazeNXT] code-server not installed - skipping"
+          fi
+
+          XPORTS="${{ github.event.inputs.extra_ports }}"
+          if [ -n "$XPORTS" ]; then
+            echo "[BlazeNXT] Extra ports requested by the operator (nothing is opened automatically on Linux): $XPORTS"
+          fi
+
+      - name: Docker Check & Keep-Alive Container
+        if: ${{ github.event.inputs.docker_mode != 'false' }}
+        shell: bash
+        run: |
+          set -u
+          echo "[BlazeNXT] Docker status:"
+          docker version --format '  client: {{.Client.Version}} | server: {{.Server.Version}}' 2>/dev/null || echo "  docker not available"
+          docker compose version 2>/dev/null | sed 's/^/  /' || true
+          if ! docker info >/dev/null 2>&1; then echo "[-] Docker daemon not responding"; exit 0; fi
+
+          docker rm -f blazenxt-keepalive >/dev/null 2>&1 || true
+          docker run -d --restart unless-stopped --name blazenxt-keepalive alpine:latest \
+            sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 || echo "[-] could not start keepalive container"
+          docker ps --format '  {{.Names}} | {{.Image}} | {{.Status}}'
+
+      - name: Verify Access Ports On Tailscale Interface
+        shell: bash
+        run: |
+          set -u
+          echo "[BlazeNXT] Checking services on the tailnet address $TAILSCALE_IP ..."
+          check() {
+            local port="$1" label="$2"
+            if timeout 6 bash -c "cat < /dev/null > /dev/tcp/$TAILSCALE_IP/$port" 2>/dev/null; then
+              echo "  [ok]   $label -> $TAILSCALE_IP:$port"
+            else
+              echo "  [warn] $label -> $TAILSCALE_IP:$port not answering"
+            fi
+          }
+          check 22 "SSH"
+          if [ "${{ github.event.inputs.install_desktop }}" != "false" ]; then
+            check 3389 "RDP (xrdp)"
+            check "${{ github.event.inputs.websocket_port }}" "noVNC browser desktop"
+            check "${{ github.event.inputs.code_server_port }}" "code-server"
+          fi
+          for p in $(echo "${{ github.event.inputs.extra_ports }}" | tr ',' ' '); do check "$p" "extra port"; done
+
+      - name: Write Session Info File
+        shell: bash
+        run: |
+          set -u
+          INFO="$HOME/BlazeNXT-Session-Info.txt"
+          {
+            echo "====================================================="
+            echo "     BlazeNXTOrg UBUNTU CLOUD WORKSTATION - LIVE"
+            echo "====================================================="
+            echo " Node name    : $NODE_NAME        <-- use this, not the IP"
+            echo " Tailscale IP : $TAILSCALE_IP"
+            echo " MagicDNS     : $TAILSCALE_DNS"
+            echo " User         : $LINUX_USER"
+            echo " SSH          : ssh $LINUX_USER@$NODE_NAME"
+            echo " RDP          : $NODE_NAME:3389    (Microsoft Remote Desktop app)"
+            echo " noVNC        : http://$NODE_NAME:${{ github.event.inputs.websocket_port }}/vnc.html"
+            echo " code-server  : http://$NODE_NAME:${{ github.event.inputs.code_server_port }}/"
+            echo " Docker       : $(docker ps --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
+            echo ""
+            echo " Backed up at shutdown and restored next session:"
+            echo "   \$HOME  +  any custom persist_paths"
+            echo "====================================================="
+          } > "$INFO"
+          mkdir -p "$HOME/Desktop" 2>/dev/null || true
+          cp "$INFO" "$HOME/Desktop/" 2>/dev/null || true
+          cat "$INFO"
+
+      - name: Publish Connection Summary
+        shell: bash
+        run: |
+          set -u
+          {
+            echo "# BlazeNXT Ubuntu Workstation Online"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Node name | \`$NODE_NAME\` |"
+            echo "| Tailscale IP | \`$TAILSCALE_IP\` |"
+            echo "| SSH | \`ssh $LINUX_USER@$NODE_NAME\` |"
+            echo "| RDP (same app as Windows) | \`$NODE_NAME:3389\` |"
+            echo "| noVNC desktop (browser) | \`http://$NODE_NAME:${{ github.event.inputs.websocket_port }}/vnc.html\` |"
+            echo "| VS Code in browser | \`http://$NODE_NAME:${{ github.event.inputs.code_server_port }}/\` |"
+            echo "| User | \`$LINUX_USER\` |"
+            echo "| Password | the LINUX_PASSWORD repo secret |"
+            echo "| Session | ${{ github.event.inputs.duration_minutes || '330' }} min, then backup + handoff |"
+            echo ""
+            echo "### Phone setup"
+            echo "1. Tailscale app - same tailnet."
+            echo "2. **Browser desktop**: open the noVNC link in Chrome. Nothing to install."
+            echo "3. **RDP**: Microsoft Remote Desktop -> PC name \`$NODE_NAME\`, user \`$LINUX_USER\`."
+            echo "4. **Terminal**: Termius / JuiceSSH -> host \`$NODE_NAME\`, user \`$LINUX_USER\`."
+            echo ""
+            echo "Always connect by the node name. If Tailscale re-registers, the IP can change."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: BlazeNXT Watchdog & Keep-Alive
+        id: keepalive
+        shell: bash
+        run: |
+          set -u
+          START=$(date +%s)
+          DUR="${{ github.event.inputs.duration_minutes }}"
+          [ -z "$DUR" ] && DUR=330
+          [ "$DUR" -lt 10 ] && DUR=10
+          [ "$DUR" -gt 355 ] && DUR=355
+          INTERVAL=300
+          WSPORT="${{ github.event.inputs.websocket_port }}"
+          CSPORT="${{ github.event.inputs.code_server_port }}"
+          DESKTOP_ON="${{ github.event.inputs.install_desktop }}"
+          DOCKER_ON="${{ github.event.inputs.docker_mode }}"
+          INFO="$HOME/BlazeNXT-Session-Info.txt"
+
+          echo "=========================================================="
+          echo "        >>> BlazeNXTOrg UBUNTU WORKSTATION READY <<<      "
+          echo "=========================================================="
+          echo " Node name : $NODE_NAME   (use this name in every client)"
+          echo " SSH       : ssh $LINUX_USER@$NODE_NAME"
+          echo " RDP       : $NODE_NAME:3389"
+          echo " noVNC     : http://$NODE_NAME:$WSPORT/vnc.html"
+          echo " code-srv  : http://$NODE_NAME:$CSPORT/"
+          echo " Session   : $DUR min, then backup + handoff to the next run"
+          echo " Watchdog  : every 5 min (SSH, xrdp, VNC, noVNC, code-server, Tailscale, Docker)"
+          echo "=========================================================="
+
+          while true; do
+            sleep "$INTERVAL"
+            NOW=$(date +%s); ELAPSED=$(( (NOW-START)/60 ))
+            HEALED=""
+
+            # Tailscale
+            TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+            if [ -z "$TS_IP" ]; then
+              sudo tailscale up --unattended >/dev/null 2>&1 || true
+              sleep 8
+              TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+              HEALED="$HEALED tailscale"
+            fi
+
+            # sshd
+            if ! ss -ltn | grep -q ':22 '; then
+              sudo ssh-keygen -A >/dev/null 2>&1 || true
+              sudo /usr/sbin/sshd >/dev/null 2>&1 || true
+              HEALED="$HEALED sshd"
+            fi
+
+            if [ "$DESKTOP_ON" != "false" ]; then
+              if ! ss -ltn | grep -q ':3389 '; then
+                sudo service xrdp start >/dev/null 2>&1 || sudo /etc/init.d/xrdp start >/dev/null 2>&1 || true
+                sleep 2
+                ss -ltn | grep -q ':3389 ' || { sudo /usr/sbin/xrdp-sesman >/dev/null 2>&1 & sudo /usr/sbin/xrdp >/dev/null 2>&1 & }
+                HEALED="$HEALED xrdp"
+              fi
+              if ! ss -ltn | grep -q ':5901 '; then
+                vncserver :1 -geometry 1600x900 -depth 24 -localhost yes -SecurityTypes None -xstartup "$HOME/.vnc/xstartup" >/dev/null 2>&1 || true
+                sleep 3
+                HEALED="$HEALED vnc"
+              fi
+              if ! ss -ltn | grep -q ":$WSPORT "; then
+                pkill -f websockify >/dev/null 2>&1 || true
+                nohup websockify --web /usr/share/novnc "$WSPORT" localhost:5901 >"$HOME/.blazenxt/novnc.log" 2>&1 &
+                sleep 2
+                HEALED="$HEALED novnc"
+              fi
+              if command -v code-server >/dev/null 2>&1 && ! ss -ltn | grep -q ":$CSPORT "; then
+                pkill -f code-server >/dev/null 2>&1 || true
+                nohup code-server --bind-addr "0.0.0.0:$CSPORT" --auth none --disable-telemetry \
+                  >"$HOME/.blazenxt/code-server.log" 2>&1 &
+                sleep 4
+                HEALED="$HEALED code-server"
+              fi
+            fi
+
+            CONTAINERS=""
+            if [ "$DOCKER_ON" != "false" ] && docker info >/dev/null 2>&1; then
+              if ! docker ps --format '{{.Names}}' | grep -q '^blazenxt-keepalive$'; then
+                docker start blazenxt-keepalive >/dev/null 2>&1 || \
+                  docker run -d --restart unless-stopped --name blazenxt-keepalive alpine:latest sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 || true
+                HEALED="$HEALED docker"
+              fi
+              CONTAINERS=$(docker ps --format '{{.Names}}' | tr '\n' ',')
+            fi
+
+            LOAD=$(cut -d' ' -f1 /proc/loadavg)
+            RAMFREE=$(free -m | awk '/^Mem:/{print $7}')
+            DISKFREE=$(df -h / | awk 'NR==2{print $4}')
+            SESSIONS=$(who | wc -l)
+            RDPUSERS=$(ss -tn state established '( sport = :3389 )' 2>/dev/null | tail -n +2 | wc -l)
+
+            {
+              echo "====================================================="
+              echo "     BlazeNXTOrg UBUNTU CLOUD WORKSTATION - LIVE"
+              echo "====================================================="
+              echo " Updated      : $(date '+%Y-%m-%d %H:%M:%S')"
+              echo " Node name    : $NODE_NAME   <-- use this, not the IP"
+              echo " Tailscale IP : $TS_IP"
+              echo " SSH          : ssh $LINUX_USER@$NODE_NAME"
+              echo " RDP          : $NODE_NAME:3389"
+              echo " noVNC        : http://$NODE_NAME:$WSPORT/vnc.html"
+              echo " code-server  : http://$NODE_NAME:$CSPORT/"
+              echo " Interactive  : $SESSIONS sessions | $RDPUSERS RDP connections"
+              echo " Uptime       : ${ELAPSED} min of ${DUR} min budget"
+              echo "====================================================="
+            } > "$INFO" 2>/dev/null || true
+            cp "$INFO" "$HOME/Desktop/" 2>/dev/null || true
+
+            echo "[$(date '+%H:%M:%S')] [BlazeNXT] Active: ${ELAPSED}m | load: $LOAD | RAM free: ${RAMFREE}MB | disk free: $DISKFREE | tailscale: ${TS_IP:-down} | docker: ${CONTAINERS:-none} | sessions: $SESSIONS | self-heal:${HEALED:- none}"
+
+            if [ "$ELAPSED" -ge "$DUR" ]; then
+              echo "[BlazeNXT] Session duration reached ($DUR min) - backing up and handing off."
+              break
+            fi
+          done
+
+      - name: Stage Session State for Next Session
+        if: ${{ always() && steps.keepalive.outcome == 'success' && github.event.inputs.persist_state != 'false' }}
+        shell: bash
+        run: |
+          set -u
+          STAGE=/tmp/blazenxt-stage
+          rm -rf "$STAGE"; mkdir -p "$STAGE/home" "$STAGE/extra"
+          CAP="${{ github.event.inputs.persist_max_mb }}"; [ -z "$CAP" ] && CAP=300
+
+          {
+            echo "BlazeNXT Ubuntu session backup manifest"
+            echo "generated|$(date '+%Y-%m-%d %H:%M:%S')"
+            echo "run|$GITHUB_RUN_ID"
+            echo "cap_mb|$CAP"
+          } > "$STAGE/manifest.txt"
+
+          echo "[BlazeNXT] Backing up \$HOME (excluding caches)..."
+          tar -C "$HOME" \
+            --exclude='.cache' --exclude='.npm' --exclude='.gradle' --exclude='.cargo/registry' \
+            --exclude='.local/share/Trash' --exclude='.blazenxt/*.log' \
+            -cf - . 2>/dev/null | tar -C "$STAGE/home" -xf - 2>/dev/null || true
+
+          EXTRA="${{ github.event.inputs.persist_paths }}"
+          if [ -n "$EXTRA" ]; then
+            i=0
+            IFS=';' read -ra PATHS <<< "$EXTRA"
+            for p in "${PATHS[@]}"; do
+              p=$(echo "$p" | xargs)
+              [ -z "$p" ] && continue
+              [ -e "$p" ] || { echo "  [skip] $p not found"; continue; }
+              name="$i$(basename "$p" | sed 's/^/ _/')"
+              mkdir -p "$STAGE/extra/$name"
+              cp -a "$p/." "$STAGE/extra/$name/" 2>/dev/null || sudo cp -a "$p/." "$STAGE/extra/$name/" 2>/dev/null || true
+              echo "extra/$name|$p" >> "$STAGE/manifest.txt"
+              echo "  backed up extra path: $p"
+              i=$((i+1))
+            done
+          fi
+
+          SIZE=$(( $(du -sm "$STAGE" 2>/dev/null | cut -f1) ))
+          echo "[BlazeNXT] Backup size: ${SIZE} MB (cap ${CAP} MB)"
+          if [ "$SIZE" -gt "$CAP" ]; then
+            echo "[BlazeNXT] Over cap - dropping extras, then large cache-ish folders."
+            rm -rf "$STAGE/extra"
+            SIZE=$(( $(du -sm "$STAGE/home" 2>/dev/null | cut -f1) ))
+            if [ "$SIZE" -gt "$CAP" ]; then
+              rm -rf "$STAGE/home/.local/share/Trash" 2>/dev/null || true
+              SIZE=$(( $(du -sm "$STAGE/home" 2>/dev/null | cut -f1) ))
+            fi
+            echo "[BlazeNXT] Final size after trimming: ${SIZE} MB"
+          fi
+          echo "final_mb|$SIZE" >> "$STAGE/manifest.txt"
+          if [ "$SIZE" -eq 0 ]; then
+            echo "[BlazeNXT] Nothing to persist."; rm -rf "$STAGE"; exit 0
+          fi
+
+      - name: Upload Session State for Next Session
+        if: ${{ always() && steps.keepalive.outcome == 'success' && github.event.inputs.persist_state != 'false' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: blazenxt-ubuntu-state
+          path: /tmp/blazenxt-stage
+          retention-days: 3
+          compression-level: 6
+          if-no-files-found: ignore
+          overwrite: true
+
+      - name: Dispatch Next Session (self-chaining)
+        if: ${{ always() && steps.keepalive.outcome == 'success' && github.event.inputs.chain_next_session != 'false' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          REPO="$GITHUB_REPOSITORY"
+          WF="blazenxt-ubuntu.yml"
+          ARGS=(api --method POST "repos/$REPO/actions/workflows/$WF/dispatches" -f ref=main)
+
+          add() { [ -n "${2:-}" ] && ARGS+=(-f "inputs[$1]=$2"); return 0; }
+          add node_name "${{ github.event.inputs.node_name }}"
+          add duration_minutes "${{ github.event.inputs.duration_minutes }}"
+          add install_desktop "${{ github.event.inputs.install_desktop }}"
+          add docker_mode "${{ github.event.inputs.docker_mode }}"
+          add ssh_password_login "${{ github.event.inputs.ssh_password_login }}"
+          add websocket_port "${{ github.event.inputs.websocket_port }}"
+          add code_server_port "${{ github.event.inputs.code_server_port }}"
+          add extra_ports "${{ github.event.inputs.extra_ports }}"
+          add persist_state "${{ github.event.inputs.persist_state }}"
+          add persist_paths "${{ github.event.inputs.persist_paths }}"
+          add persist_max_mb "${{ github.event.inputs.persist_max_mb }}"
+          add tailscale_exit_node "${{ github.event.inputs.tailscale_exit_node }}"
+
+          echo "[BlazeNXT] Dispatching the next session..."
+          if gh "${ARGS[@]}"; then
+            echo "[BlazeNXT] Next session queued - it starts when this machine is destroyed."
+          else
+            echo "[BlazeNXT] API dispatch failed - trying gh workflow run"
+            gh workflow run "$WF" --ref main --repo "$REPO" || echo "[BlazeNXT] Both dispatch methods failed - cron is the fallback"
+          fi
+          exit 0
