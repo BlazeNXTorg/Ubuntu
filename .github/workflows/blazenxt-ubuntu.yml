@@ -457,7 +457,7 @@ jobs:
             echo " Docker       : $(docker ps --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
             echo ""
             echo " Backed up at shutdown and restored next session:"
-            echo "   \$HOME  +  any custom persist_paths"
+            echo "   ~/work  +  any custom persist_paths  (encrypted)"
             echo "====================================================="
           } > "$INFO"
           mkdir -p "$HOME/Desktop" 2>/dev/null || true
@@ -632,18 +632,23 @@ jobs:
             echo "cap_mb|$CAP"
           } > "$STAGE/manifest.txt"
 
-          # The runner's own software lives in $HOME on this image (actions-runner/,
-          # _work/, its credentials). Backing that up produced a 768 MB artifact and
-          # stored runner credentials in a file that gets restored into the next
-          # session, so all of it is excluded.
-          echo "[BlazeNXT] Backing up the home folder (runner internals and caches excluded)..."
-          tar -C "$HOME" \
-            --exclude='./actions-runner' --exclude='./_work' --exclude='./work' \
-            --exclude='./.runner' --exclude='./.credentials' --exclude='./.credentials_rsaparams' \
-            --exclude='./.cache' --exclude='./.npm' --exclude='./.gradle' \
-            --exclude='./.cargo/registry' --exclude='./.local/share/Trash' \
-            --exclude='./.blazenxt' \
-            -cf - . 2>/dev/null | tar -C "$STAGE/home" -xf - 2>/dev/null || true
+          # Backing up the whole home folder is not predictable: this image ships
+          # gigabytes of language runtimes in $HOME (1353 MB of actions-runner plus
+          # ~800 MB of tool caches in one measurement). Back up what the operator
+          # actually works on instead: ~/work, their persist_paths, and a small
+          # allowlist of config files.
+          mkdir -p "$HOME/work"
+          echo "[BlazeNXT] Backing up ~/work (the designated sandbox folder)..."
+          tar -C "$HOME" --exclude='./work/.cache' -cf - ./work 2>/dev/null | tar -C "$STAGE/home" -xf - 2>/dev/null || true
+
+          CFG=""
+          for f in .ssh .gitconfig .git-credentials .bashrc .profile .bash_aliases .vimrc .tmux.conf; do
+            [ -e "$HOME/$f" ] && CFG="$CFG ./$f"
+          done
+          if [ -n "$CFG" ]; then
+            echo "[BlazeNXT] Backing up small config files:$CFG"
+            tar -C "$HOME" -cf - $CFG 2>/dev/null | tar -C "$STAGE/home" -xf - 2>/dev/null || true
+          fi
 
           EXTRA="${{ github.event.inputs.persist_paths }}"
           if [ -n "$EXTRA" ]; then
@@ -677,8 +682,8 @@ jobs:
             # Never upload past the cap: the Free plan gives ~500 MB of artifact
             # storage in total, and an oversized blob silently eats all of it.
             echo "::warning::Backup is ${SIZE} MB which exceeds the ${CAP} MB cap, so nothing was saved. The largest folders in the home directory are listed below - move the big ones out, add them to persist_paths exclusions, or raise persist_max_mb."
-            echo "[BlazeNXT] Largest folders in \$HOME:"
-            du -sm "$HOME"/* "$HOME"/.[!.]* 2>/dev/null | sort -rn | head -10
+            echo "[BlazeNXT] Largest folders in \$HOME (for reference):"
+            du -sm "$HOME"/* "$HOME"/.[!.]* 2>/dev/null | grep -v 'actions-runner' | sort -rn | head -10 || true
             rm -rf "$STAGE" "$UPLOAD"; exit 0
           fi
 
