@@ -632,10 +632,17 @@ jobs:
             echo "cap_mb|$CAP"
           } > "$STAGE/manifest.txt"
 
-          echo "[BlazeNXT] Backing up the home folder (caches excluded)..."
+          # The runner's own software lives in $HOME on this image (actions-runner/,
+          # _work/, its credentials). Backing that up produced a 768 MB artifact and
+          # stored runner credentials in a file that gets restored into the next
+          # session, so all of it is excluded.
+          echo "[BlazeNXT] Backing up the home folder (runner internals and caches excluded)..."
           tar -C "$HOME" \
-            --exclude='.cache' --exclude='.npm' --exclude='.gradle' --exclude='.cargo/registry' \
-            --exclude='.local/share/Trash' --exclude='.blazenxt/*.log' \
+            --exclude='./actions-runner' --exclude='./_work' --exclude='./work' \
+            --exclude='./.runner' --exclude='./.credentials' --exclude='./.credentials_rsaparams' \
+            --exclude='./.cache' --exclude='./.npm' --exclude='./.gradle' \
+            --exclude='./.cargo/registry' --exclude='./.local/share/Trash' \
+            --exclude='./.blazenxt' \
             -cf - . 2>/dev/null | tar -C "$STAGE/home" -xf - 2>/dev/null || true
 
           EXTRA="${{ github.event.inputs.persist_paths }}"
@@ -661,10 +668,18 @@ jobs:
             echo "[BlazeNXT] Over cap - dropping the extra paths first."
             rm -rf "$STAGE/extra"
             SIZE=$(( $(du -sm "$STAGE" 2>/dev/null | cut -f1) ))
-            echo "[BlazeNXT] Size after trimming: ${SIZE} MB"
+            echo "[BlazeNXT] Size after dropping extras: ${SIZE} MB"
           fi
           if [ "$SIZE" -eq 0 ]; then
             echo "[BlazeNXT] Nothing to persist."; rm -rf "$STAGE" "$UPLOAD"; exit 0
+          fi
+          if [ "$SIZE" -gt "$CAP" ]; then
+            # Never upload past the cap: the Free plan gives ~500 MB of artifact
+            # storage in total, and an oversized blob silently eats all of it.
+            echo "::warning::Backup is ${SIZE} MB which exceeds the ${CAP} MB cap, so nothing was saved. The largest folders in the home directory are listed below - move the big ones out, add them to persist_paths exclusions, or raise persist_max_mb."
+            echo "[BlazeNXT] Largest folders in \$HOME:"
+            du -sm "$HOME"/* "$HOME"/.[!.]* 2>/dev/null | sort -rn | head -10
+            rm -rf "$STAGE" "$UPLOAD"; exit 0
           fi
 
           PASS="${{ secrets.BACKUP_PASSPHRASE }}"
@@ -685,6 +700,11 @@ jobs:
           fi
           if [ ! -s "$UPLOAD/backup.tar.gz.gpg" ]; then
             echo "[-] Encrypted file is empty - nothing uploaded"; rm -rf "$STAGE" "$UPLOAD"; exit 0
+          fi
+          BLOBMB=$(( $(du -m "$UPLOAD/backup.tar.gz.gpg" | cut -f1) ))
+          if [ "$BLOBMB" -gt "$((CAP + 50))" ]; then
+            echo "::warning::Encrypted blob is ${BLOBMB} MB, over the ${CAP} MB cap - refusing to upload and burn the artifact quota."
+            rm -rf "$STAGE" "$UPLOAD" /tmp/blazenxt-backup.tar.gz; exit 0
           fi
 
           echo "[BlazeNXT] Verifying the backup by decrypting it again..."
