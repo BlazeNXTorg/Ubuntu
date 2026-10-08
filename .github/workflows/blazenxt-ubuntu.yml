@@ -182,20 +182,49 @@ jobs:
             echo "[BlazeNXT] Download failed - clean start."; exit 0
           fi
 
-          if [ -d "$DEST/home" ]; then
-            cp -a "$DEST/home/." "$HOME/" 2>/dev/null || true
+          CONTENT=""
+          ENC=$(find "$DEST" -type f -name '*.gpg' | head -1)
+          if [ -n "$ENC" ]; then
+            PASS="${{ secrets.BACKUP_PASSPHRASE }}"
+            if [ -z "$PASS" ]; then
+              echo "[-] Backup is encrypted, but the BACKUP_PASSPHRASE secret is not set - cannot restore it."
+              exit 0
+            fi
+            echo "::add-mask::$PASS"
+            CONTENT=/tmp/blazenxt-content
+            rm -rf "$CONTENT"; mkdir -p "$CONTENT"
+            if printf '%s' "$PASS" | gpg --batch --yes --quiet --pinentry-mode loopback --passphrase-fd 0 \
+                 --decrypt -o /tmp/blazenxt-restore.tar.gz "$ENC" 2>/dev/null; then
+              if tar -xzf /tmp/blazenxt-restore.tar.gz -C "$CONTENT" 2>/dev/null; then
+                echo "[BlazeNXT] Encrypted backup decrypted and unpacked OK"
+              else
+                echo "[-] Could not unpack the decrypted backup"; exit 0
+              fi
+              rm -f /tmp/blazenxt-restore.tar.gz
+            else
+              echo "[-] Decryption failed - wrong BACKUP_PASSPHRASE?"; exit 0
+            fi
+          elif [ -d "$DEST/home" ] || [ -d "$DEST/extra" ]; then
+            echo "::warning::This backup is UNENCRYPTED (made by an older session). Restoring anyway."
+            CONTENT="$DEST"
+          else
+            echo "[BlazeNXT] Backup had no recognisable content - clean start."; exit 0
+          fi
+
+          if [ -d "$CONTENT/home" ]; then
+            cp -a "$CONTENT/home/." "$HOME/" 2>/dev/null || true
             echo "[BlazeNXT] Restored home folder ($(find "$HOME" -type f 2>/dev/null | wc -l) files present)"
           fi
-          if [ -d "$DEST/extra" ] && [ -f "$DEST/manifest.txt" ]; then
-            grep '^extra/' "$DEST/manifest.txt" | while IFS='|' read -r rel target; do
+          if [ -d "$CONTENT/extra" ] && [ -f "$CONTENT/manifest.txt" ]; then
+            grep '^extra/' "$CONTENT/manifest.txt" | while IFS='|' read -r rel target; do
               rel=$(echo "$rel" | xargs); target=$(echo "$target" | xargs)
-              [ -d "$DEST/$rel" ] || continue
+              [ -d "$CONTENT/$rel" ] || continue
               sudo mkdir -p "$target" 2>/dev/null || mkdir -p "$target"
-              cp -a "$DEST/$rel/." "$target/" 2>/dev/null || true
+              cp -a "$CONTENT/$rel/." "$target/" 2>/dev/null || true
               echo "  restored extra path -> $target"
             done
           fi
-          rm -rf "$DEST"
+          rm -rf "$DEST" /tmp/blazenxt-content
           echo "[BlazeNXT] Restore complete."
 
       - name: Attach BlazeNXT Tailscale Node
@@ -585,13 +614,15 @@ jobs:
             fi
           done
 
-      - name: Stage Session State for Next Session
+      - name: Stage & Encrypt Session State
         if: ${{ always() && steps.keepalive.outcome == 'success' && github.event.inputs.persist_state != 'false' }}
         shell: bash
         run: |
           set -u
           STAGE=/tmp/blazenxt-stage
-          rm -rf "$STAGE"; mkdir -p "$STAGE/home" "$STAGE/extra"
+          UPLOAD=/tmp/blazenxt-upload
+          rm -rf "$STAGE" "$UPLOAD"
+          mkdir -p "$STAGE/home" "$STAGE/extra" "$UPLOAD"
           CAP="${{ github.event.inputs.persist_max_mb }}"; [ -z "$CAP" ] && CAP=300
 
           {
@@ -601,7 +632,7 @@ jobs:
             echo "cap_mb|$CAP"
           } > "$STAGE/manifest.txt"
 
-          echo "[BlazeNXT] Backing up \$HOME (excluding caches)..."
+          echo "[BlazeNXT] Backing up the home folder (caches excluded)..."
           tar -C "$HOME" \
             --exclude='.cache' --exclude='.npm' --exclude='.gradle' --exclude='.cargo/registry' \
             --exclude='.local/share/Trash' --exclude='.blazenxt/*.log' \
@@ -627,29 +658,67 @@ jobs:
           SIZE=$(( $(du -sm "$STAGE" 2>/dev/null | cut -f1) ))
           echo "[BlazeNXT] Backup size: ${SIZE} MB (cap ${CAP} MB)"
           if [ "$SIZE" -gt "$CAP" ]; then
-            echo "[BlazeNXT] Over cap - dropping extras, then large cache-ish folders."
+            echo "[BlazeNXT] Over cap - dropping the extra paths first."
             rm -rf "$STAGE/extra"
-            SIZE=$(( $(du -sm "$STAGE/home" 2>/dev/null | cut -f1) ))
-            if [ "$SIZE" -gt "$CAP" ]; then
-              rm -rf "$STAGE/home/.local/share/Trash" 2>/dev/null || true
-              SIZE=$(( $(du -sm "$STAGE/home" 2>/dev/null | cut -f1) ))
-            fi
-            echo "[BlazeNXT] Final size after trimming: ${SIZE} MB"
+            SIZE=$(( $(du -sm "$STAGE" 2>/dev/null | cut -f1) ))
+            echo "[BlazeNXT] Size after trimming: ${SIZE} MB"
           fi
-          echo "final_mb|$SIZE" >> "$STAGE/manifest.txt"
           if [ "$SIZE" -eq 0 ]; then
-            echo "[BlazeNXT] Nothing to persist."; rm -rf "$STAGE"; exit 0
+            echo "[BlazeNXT] Nothing to persist."; rm -rf "$STAGE" "$UPLOAD"; exit 0
           fi
 
-      - name: Upload Session State for Next Session
+          PASS="${{ secrets.BACKUP_PASSPHRASE }}"
+          if [ -z "$PASS" ]; then
+            echo "::warning::BACKUP_PASSPHRASE secret is not set, so nothing was saved. This repository is PUBLIC and an unencrypted backup would be downloadable by anyone, so the upload is skipped on purpose."
+            rm -rf "$STAGE" "$UPLOAD"; exit 0
+          fi
+          echo "::add-mask::$PASS"
+
+          echo "[BlazeNXT] Encrypting the backup (AES-256)..."
+          if ! tar -czf /tmp/blazenxt-backup.tar.gz -C "$STAGE" . 2>/dev/null; then
+            echo "[-] tar failed - nothing uploaded"; rm -rf "$STAGE" "$UPLOAD"; exit 0
+          fi
+          if ! printf '%s' "$PASS" | gpg --batch --yes --quiet --pinentry-mode loopback --passphrase-fd 0 \
+                --symmetric --cipher-algo AES256 -o "$UPLOAD/backup.tar.gz.gpg" /tmp/blazenxt-backup.tar.gz 2>/dev/null; then
+            echo "[-] Encryption failed - nothing uploaded"
+            rm -rf "$STAGE" "$UPLOAD" /tmp/blazenxt-backup.tar.gz; exit 0
+          fi
+          if [ ! -s "$UPLOAD/backup.tar.gz.gpg" ]; then
+            echo "[-] Encrypted file is empty - nothing uploaded"; rm -rf "$STAGE" "$UPLOAD"; exit 0
+          fi
+
+          echo "[BlazeNXT] Verifying the backup by decrypting it again..."
+          SELF_OK=0
+          if printf '%s' "$PASS" | gpg --batch --yes --quiet --pinentry-mode loopback --passphrase-fd 0 \
+                --decrypt -o /tmp/blazenxt-verify.tar.gz "$UPLOAD/backup.tar.gz.gpg" 2>/dev/null; then
+            A=$(sha256sum /tmp/blazenxt-backup.tar.gz | cut -d' ' -f1)
+            B=$(sha256sum /tmp/blazenxt-verify.tar.gz 2>/dev/null | cut -d' ' -f1)
+            if [ -n "$A" ] && [ "$A" = "$B" ]; then
+              echo "[BlazeNXT] Self-test passed - sha256 ${A:0:16} (decrypt of the uploaded blob matches the source)"
+              SELF_OK=1
+            else
+              echo "::warning::Backup self-test mismatch - refusing to upload"
+            fi
+          else
+            echo "::warning::Backup self-test could not decrypt - refusing to upload"
+          fi
+          [ "$SELF_OK" -eq 1 ] || { rm -rf "$UPLOAD"; }
+
+          rm -f /tmp/blazenxt-backup.tar.gz /tmp/blazenxt-verify.tar.gz
+          rm -rf "$STAGE"
+          if [ -s "$UPLOAD/backup.tar.gz.gpg" ]; then
+            echo "[BlazeNXT] Encrypted backup ready: $(du -h "$UPLOAD/backup.tar.gz.gpg" | cut -f1)"
+          fi
+
+      - name: Upload Encrypted Session State
         if: ${{ always() && steps.keepalive.outcome == 'success' && github.event.inputs.persist_state != 'false' }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: blazenxt-ubuntu-state
-          path: /tmp/blazenxt-stage
+          path: /tmp/blazenxt-upload
           retention-days: 3
-          compression-level: 6
+          compression-level: 0
           if-no-files-found: ignore
           overwrite: true
 
