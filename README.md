@@ -32,6 +32,7 @@ Tailscale. Four ways in, one machine:
 | Desktop | XFCE via xrdp and via noVNC |
 | Docker | preinstalled engine + compose, keep-alive container |
 | Watchdog | every 5 min: SSH, xrdp, VNC, noVNC, code-server, Tailscale, Docker self-heal |
+| Boot time | ~2 min with the desktop stack, ~1 min SSH-only (measured ~50 s for the apt install) |
 | Backup | `$HOME` + custom paths, restored into the next session |
 
 ## Secrets required
@@ -46,8 +47,9 @@ Tailscale. Four ways in, one machine:
 ## Run it
 
 `Actions` → **BlazeNXT Ubuntu Workstation** → **Run workflow**.
-Full desktop stack boots in roughly **6–8 minutes**; set `install_desktop: false`
-for an SSH + Docker box in about a minute.
+The full desktop stack installs in **~50 seconds** on the ubuntu-24.04 image
+(measured), so a session is usable about **2 minutes** after you press Run.
+Set `install_desktop: false` for an SSH + Docker box that is ready almost immediately.
 
 Read the run **Summary** for the live addresses.
 
