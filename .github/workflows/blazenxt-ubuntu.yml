@@ -1,9 +1,6 @@
 name: BlazeNXT Ubuntu Workstation
 
 on:
-  schedule:
-    # Backstop only - the self-chain is the primary mechanism.
-    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       node_name:
@@ -64,11 +61,6 @@ on:
         type: boolean
         required: false
         default: false
-      chain_next_session:
-        description: "Start the next session automatically when this one ends"
-        type: boolean
-        required: false
-        default: true
 
 permissions:
   contents: read
@@ -754,38 +746,3 @@ jobs:
           compression-level: 0
           if-no-files-found: ignore
           overwrite: true
-
-      - name: Dispatch Next Session (self-chaining)
-        if: ${{ always() && steps.keepalive.outcome == 'success' && github.event.inputs.chain_next_session != 'false' }}
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -u
-          REPO="$GITHUB_REPOSITORY"
-          WF="blazenxt-ubuntu.yml"
-          ARGS=(api --method POST "repos/$REPO/actions/workflows/$WF/dispatches" -f ref=main)
-
-          add() { [ -n "${2:-}" ] && ARGS+=(-f "inputs[$1]=$2"); return 0; }
-          add node_name "${{ github.event.inputs.node_name }}"
-          add duration_minutes "${{ github.event.inputs.duration_minutes }}"
-          add install_desktop "${{ github.event.inputs.install_desktop }}"
-          add docker_mode "${{ github.event.inputs.docker_mode }}"
-          add ssh_password_login "${{ github.event.inputs.ssh_password_login }}"
-          add websocket_port "${{ github.event.inputs.websocket_port }}"
-          add code_server_port "${{ github.event.inputs.code_server_port }}"
-          add extra_ports "${{ github.event.inputs.extra_ports }}"
-          add persist_state "${{ github.event.inputs.persist_state }}"
-          add persist_paths "${{ github.event.inputs.persist_paths }}"
-          add persist_max_mb "${{ github.event.inputs.persist_max_mb }}"
-          add tailscale_exit_node "${{ github.event.inputs.tailscale_exit_node }}"
-
-          echo "[BlazeNXT] Dispatching the next session..."
-          if gh "${ARGS[@]}"; then
-            echo "[BlazeNXT] Next session queued - it starts when this machine is destroyed."
-          else
-            echo "[BlazeNXT] API dispatch failed - trying gh workflow run"
-            gh workflow run "$WF" --ref main --repo "$REPO" || echo "[BlazeNXT] Both dispatch methods failed - cron is the fallback"
-          fi
-          exit 0
