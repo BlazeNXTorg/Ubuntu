@@ -323,21 +323,34 @@ jobs:
         run: |
           set -u
           echo "[BlazeNXT] Checking services on the tailnet address $TAILSCALE_IP ..."
+          FAILED=""
           check() {
-            local port="$1" label="$2"
-            if timeout 6 bash -c "cat < /dev/null > /dev/tcp/$TAILSCALE_IP/$port" 2>/dev/null; then
-              echo "  [ok]   $label -> $TAILSCALE_IP:$port"
-            else
-              echo "  [warn] $label -> $TAILSCALE_IP:$port not answering"
-            fi
+            local port="$1" label="$2" required="$3"
+            for attempt in 1 2 3 4; do
+              if timeout 6 bash -c "cat < /dev/null > /dev/tcp/$TAILSCALE_IP/$port" 2>/dev/null; then
+                echo "  [ok]   $label -> $TAILSCALE_IP:$port"
+                return 0
+              fi
+              sleep 5
+            done
+            echo "  [FAIL] $label -> $TAILSCALE_IP:$port NOT answering after 4 attempts"
+            if [ "$required" = "required" ]; then FAILED="$FAILED $label($port)"; fi
+            return 1
           }
-          check 22 "SSH"
+          check 22 "SSH" required
           if [ "${{ github.event.inputs.install_desktop }}" != "false" ]; then
-            check 3389 "RDP (xrdp)"
-            check "${{ github.event.inputs.websocket_port }}" "noVNC browser desktop"
-            check "${{ github.event.inputs.code_server_port }}" "code-server"
+            check 3389 "RDP (xrdp)" required
+            check "${{ github.event.inputs.websocket_port }}" "noVNC browser desktop" required
+            check "${{ github.event.inputs.code_server_port }}" "code-server" optional
           fi
-          for p in $(echo "${{ github.event.inputs.extra_ports }}" | tr ',' ' '); do check "$p" "extra port"; done
+          for p in $(echo "${{ github.event.inputs.extra_ports }}" | tr ',' ' '); do
+            [ -n "$p" ] && check "$p" "extra port" optional
+          done
+          if [ -n "$FAILED" ]; then
+            echo "[-] Required services not reachable on the tailnet:$FAILED"
+            exit 1
+          fi
+          echo "[BlazeNXT] All required services answer on $TAILSCALE_IP"
 
       - name: Write Session Info File
         shell: bash
@@ -389,7 +402,7 @@ jobs:
             echo "1. Tailscale app - same tailnet."
             echo "2. **Browser desktop**: open the noVNC link in Chrome. Nothing to install."
             echo "3. **RDP**: Microsoft Remote Desktop -> PC name \`$NODE_NAME\`, user \`$LINUX_USER\`."
-            echo "4. **Terminal**: Termius / JuiceSSH -> host \`$NODE_NAME\`, user \`$LINUX_USER\`."
+            echo "4. **Termius (SSH)**: Tailscale app ON -> new host -> address \`$NODE_NAME\` (or \`$TAILSCALE_IP\`), port 22, user \`$LINUX_USER\`, password = LINUX_PASSWORD secret."
             echo ""
             echo "Always connect by the node name. If Tailscale re-registers, the IP can change."
           } >> "$GITHUB_STEP_SUMMARY"
