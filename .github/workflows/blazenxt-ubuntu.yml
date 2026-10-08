@@ -224,13 +224,16 @@ jobs:
             echo "[BlazeNXT] Restored home folder ($(find "$HOME" -type f 2>/dev/null | wc -l) files present)"
           fi
           if [ -d "$CONTENT/extra" ] && [ -f "$CONTENT/manifest.txt" ]; then
-            grep '^extra/' "$CONTENT/manifest.txt" | while IFS='|' read -r rel target; do
+            # '|| true' matters: GitHub runs bash with -e -o pipefail, so a grep with
+            # no matches (exit 1) would fail the whole step even though nothing is wrong.
+            grep '^extra/' "$CONTENT/manifest.txt" 2>/dev/null | while IFS='|' read -r rel target; do
               rel=$(echo "$rel" | xargs); target=$(echo "$target" | xargs)
+              [ -n "$rel" ] || continue
               [ -d "$CONTENT/$rel" ] || continue
-              sudo mkdir -p "$target" 2>/dev/null || mkdir -p "$target"
-              cp -a "$CONTENT/$rel/." "$target/" 2>/dev/null || true
+              sudo mkdir -p "$target" 2>/dev/null || mkdir -p "$target" || true
+              sudo cp -a "$CONTENT/$rel/." "$target/" 2>/dev/null || cp -a "$CONTENT/$rel/." "$target/" 2>/dev/null || true
               echo "  restored extra path -> $target"
-            done
+            done || true
           fi
           rm -rf "$DEST" /tmp/blazenxt-content
           echo "[BlazeNXT] Restore complete."
