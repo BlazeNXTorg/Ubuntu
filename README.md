@@ -67,6 +67,33 @@ Set `install_desktop: false` for an SSH + Docker box that is ready almost immedi
 
 Read the run **Summary** for the live addresses.
 
+## Sandbox folder and backups
+
+Put the agent's work in **`/workspace`** — it is created at boot and is the one
+thing that survives. Backups are **encrypted with AES-256 before upload** (the
+`BACKUP_PASSPHRASE` secret), because this repository is public and artifacts on a
+public repo are downloadable by anyone.
+
+| | |
+|---|---|
+| Persisted by default | `/workspace` + tiny config files (`.ssh`, `.gitconfig`, `.bashrc`, `.profile`, ...) |
+| Add more | `persist_paths` input, e.g. `/opt/data;/srv/app` |
+| Encrypted | yes — gpg symmetric AES-256, verified by a decrypt-and-compare self-test on every backup |
+| Size cap | `persist_max_mb` (default 300). Over the cap the upload is **skipped** with a warning, never silently uploaded |
+| Kept | latest backup only (older ones pruned) |
+| Without the passphrase | backup is skipped entirely — plaintext is never uploaded to a public repo |
+
+Decrypt a backup on your own machine:
+
+```bash
+gpg --decrypt -o backup.tar.gz backup.tar.gz.gpg   # enter the passphrase
+tar -xzf backup.tar.gz
+```
+
+> Note: `$HOME` is **not** backed up wholesale. This image ships gigabytes of
+> runtimes in `$HOME` (the runner's own `actions-runner` alone measured 1353 MB),
+> so home-wide backups were unpredictable and blew past the cap. Explicit paths only.
+
 ## Continuity
 
 - Sessions **self-chain**: each one dispatches its own successor when it ends.
