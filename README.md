@@ -42,7 +42,21 @@ Tailscale. Four ways in, one machine:
 | Secret | Purpose |
 |---|---|
 | `TAILSCALE_AUTH_KEY` | ephemeral reusable key from the Tailscale admin console |
-| `LINUX_PASSWORD` | password for the `runner` account (SSH + RDP) |
+| `LINUX_PASSWORD` | password for **both** `root` and `runner` (SSH + RDP) |
+
+## Accounts
+
+| Account | Password | Powers |
+|---|---|---|
+| `root` | `LINUX_PASSWORD` secret | full root, direct login over SSH and RDP |
+| `runner` | `LINUX_PASSWORD` secret | passwordless `sudo` — also full root |
+
+`root_login: false` disables the root account login (SSH `PermitRootLogin no`,
+xrdp `AllowRootLogin=false`) and leaves you with `runner` + sudo.
+
+> **Security:** root plus a simple password on a reachable port is the easiest way
+> into a box. It is reachable only from your tailnet, but anyone in that tailnet can
+> take it over with one command. Set `root_login: false` when you do not need it.
 
 ## Run it
 

@@ -24,6 +24,11 @@ on:
         type: boolean
         required: false
         default: true
+      root_login:
+        description: "Allow logging in AS root (SSH + RDP) with the LINUX_PASSWORD secret. Full root access."
+        type: boolean
+        required: false
+        default: true
       ssh_password_login:
         description: "Allow SSH password login (LINUX_PASSWORD secret). Key-based auth always works."
         type: boolean
@@ -133,6 +138,14 @@ jobs:
           # Disable the xrdp login screen prompts; keep the session simple
           sudo sed -i 's/^new_cursors=true/new_cursors=false/' /etc/xrdp/xrdp.ini 2>/dev/null || true
 
+          # Allow root to log in over RDP
+          if grep -q '^AllowRootLogin' /etc/xrdp/xrdp.ini 2>/dev/null; then
+            sudo sed -i 's/^AllowRootLogin.*/AllowRootLogin=true/' /etc/xrdp/xrdp.ini
+          else
+            printf '\nAllowRootLogin=true\n' | sudo tee -a /etc/xrdp/xrdp.ini >/dev/null
+          fi
+          echo "[BlazeNXT] xrdp AllowRootLogin=true"
+
           echo "[BlazeNXT] Installing code-server (VS Code in the browser)..."
           curl -fsSL https://code-server.dev/install.sh | sh >/dev/null 2>&1 || echo "[BlazeNXT] code-server install failed - continuing"
           echo "[BlazeNXT] Stack ready."
@@ -225,21 +238,43 @@ jobs:
           echo "LINUX_PASSWORD=$PW" >> "$GITHUB_ENV"
           echo "LINUX_USER=$USER" >> "$GITHUB_ENV"
 
+          ROOT_ON="${{ github.event.inputs.root_login }}"
+          [ "$ROOT_ON" = "false" ] || ROOT_ON="true"
+          echo "ROOT_LOGIN=$ROOT_ON" >> "$GITHUB_ENV"
+
+          # runner account (always usable, passwordless sudo = full root anyway)
           if echo "$USER:$PW" | sudo chpasswd; then
-            echo "[BlazeNXT] Password set for user $USER"
+            echo "[BlazeNXT] Password set for $USER"
           else
-            echo "[-] chpasswd failed"
+            echo "[-] chpasswd failed for $USER"
+          fi
+
+          # root account
+          if [ "$ROOT_ON" = "true" ]; then
+            if echo "root:$PW" | sudo chpasswd; then
+              echo "[BlazeNXT] Password set for root"
+            else
+              echo "[-] chpasswd failed for root"
+            fi
+            sudo passwd -u root >/dev/null 2>&1 || true
+            sudo mkdir -p /root
+            printf '#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nexec startxfce4\n' | sudo tee /root/.xsession >/dev/null
+            sudo chmod 755 /root/.xsession
+            echo "[BlazeNXT] Root desktop session prepared for xrdp"
           fi
 
           ssh_accept="yes"
           if [ "${{ github.event.inputs.ssh_password_login }}" = "false" ]; then ssh_accept="no"; fi
 
+          root_ssh="no"
+          if [ "$ROOT_ON" = "true" ]; then root_ssh="yes"; fi
+
           # /run/sshd does not exist on a fresh container and sshd refuses to start
-          # without it ("Missing privilege separation directory"). Create it first.
+          # without it ("Missing privilege separation directory").
           sudo mkdir -p /run/sshd /etc/ssh/sshd_config.d
 
-          printf 'Port 22\nPasswordAuthentication %s\nKbdInteractiveAuthentication %s\nPermitRootLogin no\nUsePAM yes\nClientAliveInterval 30\nClientAliveCountMax 240\n' \
-            "$ssh_accept" "$ssh_accept" | sudo tee /etc/ssh/sshd_config.d/99-blazenxt.conf >/dev/null
+          printf 'Port 22\nPasswordAuthentication %s\nKbdInteractiveAuthentication %s\nPermitRootLogin %s\nUsePAM yes\nClientAliveInterval 30\nClientAliveCountMax 240\n' \
+            "$ssh_accept" "$ssh_accept" "$root_ssh" | sudo tee /etc/ssh/sshd_config.d/99-blazenxt.conf >/dev/null
 
           sudo ssh-keygen -A >/dev/null 2>&1 || true
           sudo systemctl restart ssh >/dev/null 2>&1 || sudo service ssh restart >/dev/null 2>&1 || true
@@ -252,10 +287,15 @@ jobs:
           fi
 
           if ss -ltn | grep -q ':22 '; then
-            echo "[BlazeNXT] SSH listening on 22 | user: $USER | password login: $ssh_accept"
+            echo "[BlazeNXT] SSH listening on 22 | runner: password=$ssh_accept | root login: $root_ssh"
           else
             echo "[-] sshd still not listening"
             sudo /usr/sbin/sshd -t 2>&1 | head -5 || true
+          fi
+
+          if [ "$root_ssh" = "yes" ]; then
+            echo "[BlazeNXT] FULL ROOT ACCESS ENABLED: ssh root@<node> and RDP as root both work."
+            echo "[BlazeNXT] SECURITY: root + a simple password on a reachable SSH port. Keep the repo private or turn root_login off when you are done."
           fi
           exit 0
 
@@ -373,7 +413,15 @@ jobs:
             echo " Tailscale IP : $TAILSCALE_IP"
             echo " MagicDNS     : $TAILSCALE_DNS"
             echo " User         : $LINUX_USER"
+            if [ "$ROOT_LOGIN" = "true" ]; then
+              echo " Root login   : ENABLED (user: root)"
+            else
+              echo " Root login   : disabled (use sudo from $LINUX_USER)"
+            fi
             echo " SSH          : ssh $LINUX_USER@$NODE_NAME"
+            if [ "$ROOT_LOGIN" = "true" ]; then
+              echo " SSH (root)   : ssh root@$NODE_NAME"
+            fi
             echo " RDP          : $NODE_NAME:3389    (Microsoft Remote Desktop app)"
             echo " noVNC        : http://$NODE_NAME:${{ github.event.inputs.websocket_port }}/vnc.html"
             echo " code-server  : http://$NODE_NAME:${{ github.event.inputs.code_server_port }}/"
@@ -403,6 +451,10 @@ jobs:
             echo "| noVNC desktop (browser) | \`http://$NODE_NAME:${{ github.event.inputs.websocket_port }}/vnc.html\` |"
             echo "| VS Code in browser | \`http://$NODE_NAME:${{ github.event.inputs.code_server_port }}/\` |"
             echo "| User | \`$LINUX_USER\` |"
+            if [ "$ROOT_LOGIN" = "true" ]; then
+              echo "| Root user | \`root\` (full root, SSH + RDP) |"
+              echo "| Root SSH | \`ssh root@$NODE_NAME\` |"
+            fi
             echo "| Password | the LINUX_PASSWORD repo secret |"
             echo "| Session | ${{ github.event.inputs.duration_minutes || '330' }} min, then backup + handoff |"
             echo ""
