@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brew & Bean | Artisan Coffee Shop</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Navbar -->
+    <header class="navbar">
+        <div class="container nav-container">
+            <a href="#" class="logo">Brew & <span>Bean</span></a>
+            <nav class="nav-links">
+                <a href="#hero">Home</a>
+                <a href="#menu">Menu</a>
+                <a href="#about">About</a>
+                <a href="#testimonials">Reviews</a>
+                <a href="#contact" class="btn-nav">Visit Us</a>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Hero Section -->
+    <section id="hero" class="hero">
+        <div class="container hero-content">
+            <span class="badge">100% Organic & Ethically Sourced</span>
+            <h1>Awaken Your Senses with Every Sip</h1>
+            <p>Experience handcrafted artisan coffee roasted to perfection in a cozy, welcoming atmosphere designed for connection and calm.</p>
+            <div class="hero-buttons">
+                <a href="#menu" class="btn btn-primary">Explore Menu</a>
+                <a href="#contact" class="btn btn-outline">Find Us</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Menu Highlights -->
+    <section id="menu" class="menu-section">
+        <div class="container">
+            <div class="section-title">
+                <h2>Our Signature Brews</h2>
+                <p>Carefully curated flavors crafted by expert baristas</p>
+            </div>
+            <div class="menu-grid">
+                <div class="menu-card">
+                    <div class="menu-img-placeholder espresso"></div>
+                    <div class="menu-info">
+                        <h3>Velvet Hazelnut Latte</h3>
+                        <p>Rich espresso blended with steamed oat milk and house-made organic hazelnut syrup.</p>
+                        <span class="price">$5.50</span>
+                    </div>
+                </div>
+                <div class="menu-card">
+                    <div class="menu-img-placeholder coldbrew"></div>
+                    <div class="menu-info">
+                        <h3>Nitro Cold Brew</h3>
+                        <p>Steeped for 24 hours, infused with nitrogen for a creamy, cascading texture and smooth finish.</p>
+                        <span class="price">$4.75</span>
+                    </div>
+                </div>
+                <div class="menu-card">
+                    <div class="menu-img-placeholder matcha"></div>
+                    <div class="menu-info">
+                        <h3>Ceremonial Matcha</h3>
+                        <p>Authentic Uji green tea whisked with vanilla bean syrup and microfoamed almond milk.</p>
+                        <span class="price">$6.00</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Testimonials -->
+    <section id="testimonials" class="testimonials-section">
+        <div class="container">
+            <div class="section-title">
+                <h2>Loved by Locals</h2>
+                <p>Hear what our coffee community has to say</p>
+            </div>
+            <div class="testimonial-grid">
+                <div class="testimonial-card">
+                    <p class="quote">"The absolute best nitro cold brew in town! The ambiance makes it my go-to spot for remote work and meeting friends."</p>
+                    <div class="author">
+                        <h4>Sarah Jenkins</h4>
+                        <span>Regular Patron</span>
+                    </div>
+                </div>
+                <div class="testimonial-card">
+                    <p class="quote">"Their pastries are fresh daily and the hazelnut latte is pure magic. Super friendly baristas and cozy vibes!"</p>
+                    <div class="author">
+                        <h4>Marcus Vance</h4>
+                        <span>Coffee Connoisseur</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Contact Section -->
+    <section id="contact" class="contact-section">
+        <div class="container contact-grid">
+            <div class="contact-info">
+                <h2>Come Say Hello</h2>
+                <p>We'd love to pour you a fresh cup today.</p>
+                <div class="info-item">
+                    <strong>📍 Location:</strong> 742 Evergreen Terrace, Coffee District
+                </div>
+                <div class="info-item">
+                    <strong>⏰ Hours:</strong> Mon - Sun: 7:00 AM – 7:00 PM
+                </div>
+                <div class="info-item">
+                    <strong>📞 Phone:</strong> (555) 123-4567
+                </div>
+            </div>
+            <form class="contact-form" id="coffeeForm">
+                <h3>Send Us a Message</h3>
+                <div class="form-group">
+                    <input type="text" id="name" placeholder="Your Name" required>
+                </div>
+                <div class="form-group">
+                    <input type="email" id="email" placeholder="Your Email" required>
+                </div>
+                <div class="form-group">
+                    <textarea id="message" rows="4" placeholder="Your Message" required></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Send Message</button>
+                <p id="formStatus" class="form-status"></p>
+            </form>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container footer-content">
+            <p>&copy; 2026 Brew & Bean. All rights reserved.</p>
+            <div class="socials">
+                <a href="#">Instagram</a>
+                <a href="#">Facebook</a>
+                <a href="#">Twitter</a>
+            </div>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
